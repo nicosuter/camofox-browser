@@ -3243,6 +3243,56 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
   }
 });
 
+// Full rendered HTML (post-JS DOM) via Playwright page.content(). This is DOM
+// serialization, NOT page.evaluate -- a distinct route from /evaluate that runs
+// no page-supplied JS.
+/**
+ * @openapi
+ * /tabs/{tabId}/content:
+ *   get:
+ *     tags: [Content]
+ *     summary: Full rendered HTML of the page (post-JS)
+ *     parameters:
+ *       - name: tabId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: userId
+ *         in: query
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: HTML content.
+ *       404:
+ *         description: Tab not found.
+ */
+app.get('/tabs/:tabId/content', async (req, res) => {
+  try {
+    const userId = req.query.userId;
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    const session = sessions.get(normalizeUserId(userId));
+    const found = session && findTab(session, req.params.tabId);
+    if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
+    session.lastAccess = Date.now();
+
+    const { tabState } = found;
+    tabState.toolCalls++; tabState.consecutiveTimeouts = 0; tabState.consecutiveFailures = 0;
+
+    const html = await withUserLimit(userId, () => withTimeout(
+      tabState.page.content(), requestTimeoutMs(), 'content'));
+
+    snapshotBytes.labels('content').observe(Buffer.byteLength(html || '', 'utf8'));
+    log('info', 'content', { reqId: req.reqId, tabId: req.params.tabId, url: tabState.page.url(), bytes: Buffer.byteLength(html || '', 'utf8') });
+    res.json({ ok: true, url: tabState.page.url(), html });
+  } catch (err) {
+    log('error', 'content failed', { reqId: req.reqId, tabId: req.params.tabId, error: err.message });
+    handleRouteError(err, req, res);
+  }
+});
+
 // Wait for page ready
 /**
  * @openapi
